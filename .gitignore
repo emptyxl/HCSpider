@@ -105,3 +105,6 @@ venv.bak/
 
 # chromedriver
 chromedriver
+
+# MACOS
+*/.DS_Store
