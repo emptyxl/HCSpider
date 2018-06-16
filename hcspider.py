@@ -1,11 +1,16 @@
 # -*- coding: UTF-8 -*-
-from selenium import webdriver
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy import Column, String, Integer, Text
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy import create_engine
 from selenium.webdriver.chrome.options import Options
 from seleniumrequests import Chrome as post_Chrome
-from multiprocessing import Pool, Lock, Manager
+from selenium import webdriver
+from parse_sim_url import remove_sim_url
 from urllib import parse
 from lxml import etree
-from parse_sim_url import remove_sim_url
+from concurrent.futures import ThreadPoolExecutor
+import os
 import re
 import random
 import time
@@ -15,12 +20,9 @@ import pybloomfilter
 import multiprocessing
 import threadpool
 import threading
-from sqlalchemy import create_engine
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy import Column, String, Integer, Text
-from sqlalchemy.orm import sessionmaker
+import json
 
-MAX_RECURSION_DEPTH = 1
+MAX_RECURSION_DEPTH = 2
 q = queue.Queue()
 url_bloom = pybloomfilter.BloomFilter(10000, 0.01, 'url.bloom')
 delay_time = [0, 2, 5, 10, 20, 60]
@@ -64,7 +66,7 @@ class SpiderItem(Base):
     deep = Column(Integer, nullable=False, default=0)
 
     def __str__(self):
-        return 'Item [%s] %s' % (self.method, self.url[:20])
+        return 'Item [%s] %s' % (self.method, self.url)
 
 
 def cookie2dict(cookie):
@@ -189,9 +191,9 @@ def parse_page(tree, current_url, delay, deep, br):
             uuid += '/' + '&'.join(sorted([_ for _ in post_data]))
             if uuid not in url_bloom:
                 q.put(('post', form_url, post_data, delay, deep + 1))
-                session.add(SpiderItem(method=method, url=form_url, netloc=parse.urlparse(form_url).netloc, data=post_data, deep=deep+1))
+                session.add(SpiderItem(method=method, url=form_url, netloc=parse.urlparse(form_url).netloc, data=json.dumps(post_data), deep=deep+1))
                 session.commit()
-                logger.info('add item: [%s] %s' %(method, form_url[:20]))
+                logger.info('add item: [%s] %s' %(method, form_url))
             url_bloom.add(uuid)
 
         path_list = [parse.urlparse(_[1]).path for _ in tmp]
@@ -201,21 +203,32 @@ def parse_page(tree, current_url, delay, deep, br):
                 q.put(item)
                 session.add(SpiderItem(method=item[0], url=item[1], netloc=parse.urlparse(item[1]).netloc, data=item[2], deep=item[4]))
                 session.commit()
-                logger.info('add item: [%s] %s' %(method, item[1][:20]))
+                logger.info('add item: [%s] %s' %(method, item[1]))
 
 
 
-def get_url_hc(cookie):
+def get_url_hc(cookie, ThreadId):
+    logger.debug('start Thread [%s]' % ThreadId)
     global q, url_bloom
     try:
         RETRY = 0
-        while q.qsize() > 0:
-            item = q.get(timeout=5)
+        while RETRY < 5:
+            if q.qsize()>0:
+                try:
+                    item = q.get(timeout=3)
+                except:
+                    RETRY += 1
+                    continue
+            else:
+                time.sleep(5)
+                RETRY += 1
+                continue
             # each item in queue consists of (method, url, data, delay, deep)
             method, url, data, delay, deep = item[0], item[1], item[2], item[3], item[4]
             if deep >= MAX_RECURSION_DEPTH:
                 continue
             time.sleep(delay)
+            logger.debug('[Thread %d] start to parse : %s' % (ThreadId, url))
             # set config
             chrome_options = Options()
             chrome_options.add_argument("--headless")
@@ -303,9 +316,16 @@ def start_spider(surl, deep=0, delay_level=0, method='get', data=None, cookie=No
     q.put((method, start_url, data, delay, deep))
     session.add(SpiderItem(method=method, url=start_url, netloc=parse.urlparse(start_url).netloc, data=data, deep=deep))
     session.commit()
-    logger.info('add item: [%s] %s' %(method, start_url[:20]))
-    get_url_hc(cookie)
+    logger.info('add item: [%s] %s' %(method, start_url))
+    # get_url_hc(cookie)
+    # DEFAULT_THREAD_NUMBER = (os.cpu_count() or 1) * 5
+    DEFAULT_THREAD_NUMBER = os.cpu_count() or 1
+    params = [cookie] * DEFAULT_THREAD_NUMBER
+    ThreadId = [_ for _ in range(DEFAULT_THREAD_NUMBER)]
+    with ThreadPoolExecutor(max_workers=DEFAULT_THREAD_NUMBER) as executor:
+        executor.map(get_url_hc, params, ThreadId)
 
+    print('crawl completed')
 
 if __name__ == '__main__':
-    start_spider('https://www.taobao.com')
+    start_spider('https://v.qq.com', delay_level=2)

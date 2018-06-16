@@ -33,9 +33,9 @@ def Cosine(list1, list2):
         return 0
     dataA = np.mat(list1)
     dataB = np.mat(list2)
-    sumData = dataA * dataB.T  # 若列为向量则为 dataA.T * dataB
+    sumData = dataA * dataB.T
     denom = np.linalg.norm(dataA) * np.linalg.norm(dataB)
-    # 归一化
+    
     return 0.5 + 0.5 * (sumData / denom)
 
 
