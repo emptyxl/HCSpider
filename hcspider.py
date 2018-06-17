@@ -26,6 +26,7 @@ MAX_RECURSION_DEPTH = 2
 q = queue.Queue()
 url_bloom = pybloomfilter.BloomFilter(10000, 0.01, 'url.bloom')
 delay_time = [0, 2, 5, 10, 20, 60]
+REG_DOMAIN = '^[]\s\S]*$'
 
 # set logger
 logger = logging.getLogger('mylog')
@@ -140,13 +141,13 @@ def parse_form_input(type, name, value):
     return None
 
 
-def parse_page(tree, current_url, delay, deep, br):
+def parse_page(tree, current_url, delay, deep, br, domain):
     tmp = []
     global q, url_bloom
     # get url in href
     for link in tree.xpath("//@href"):
         curl = clean_up_url(link, current_url)
-        if (curl is not None) and not re.match(r'[\s\S]*(\.png|\.jpg|\.css|\.gif|\.js|\.ico|\.xml|\.svg)$', parse.urlparse(link).path):
+        if (curl is not None) and not re.match(r'[\s\S]*(\.png|\.jpg|\.css|\.gif|\.js|\.ico|\.xml|\.svg|\.pdf)$', parse.urlparse(link).path):
             uuid = calc_url_uuid('get', link)
             if uuid not in url_bloom:
                 # each item in queue consists of (method, url, data, delay, deep)
@@ -189,7 +190,7 @@ def parse_page(tree, current_url, delay, deep, br):
                 parse.urlparse(form_url).netloc + \
                 parse.urlparse(form_url).path
             uuid += '/' + '&'.join(sorted([_ for _ in post_data]))
-            if uuid not in url_bloom:
+            if uuid not in url_bloom and re.match(domain, form_url):
                 q.put(('post', form_url, post_data, delay, deep + 1))
                 session.add(SpiderItem(method=method, url=form_url, netloc=parse.urlparse(form_url).netloc, data=json.dumps(post_data), deep=deep+1))
                 session.commit()
@@ -199,7 +200,7 @@ def parse_page(tree, current_url, delay, deep, br):
         path_list = [parse.urlparse(_[1]).path for _ in tmp]
         sim_list = remove_sim_url(path_list)
         for item in tmp:
-            if parse.urlparse(item[1]).path in sim_list:
+            if parse.urlparse(item[1]).path in sim_list and re.match(domain, item[1]):
                 q.put(item)
                 session.add(SpiderItem(method=item[0], url=item[1], netloc=parse.urlparse(item[1]).netloc, data=item[2], deep=item[4]))
                 session.commit()
@@ -207,7 +208,7 @@ def parse_page(tree, current_url, delay, deep, br):
 
 
 
-def get_url_hc(cookie, ThreadId):
+def get_url_hc(cookie, ThreadId, domain):
     logger.debug('start Thread [%s]' % ThreadId)
     global q, url_bloom
     try:
@@ -242,10 +243,17 @@ def get_url_hc(cookie, ThreadId):
                 browser.set_page_load_timeout(15)
                 browser.set_script_timeout(15)
                 browser.implicitly_wait(10)
-                try:
-                    browser.get(url)
-                except:
-                    logger.error('get %s timeout' % url)
+                RETRY = 0
+                Flag = False
+                while RETRY<3 and not Flag:
+                    try:
+                        browser.get(url)
+                        Flag = True
+                    except:
+                        logger.error('get %s timeout' % url)
+                        RETRY += 1
+
+                if not Flag:
                     continue
 
                 if cookie is not None:
@@ -266,7 +274,7 @@ def get_url_hc(cookie, ThreadId):
                 except:
                     continue
 
-                parse_page(tree, url, delay, deep, browser)
+                parse_page(tree, url, delay, deep, browser, domain)
 
             elif method == 'post':
                 browser = post_Chrome(
@@ -281,22 +289,29 @@ def get_url_hc(cookie, ThreadId):
                     for key in Cookies:
                         browser.add_cookie(
                             {'name': key, 'value': Cookies[key]})
-                try:
-                    response = browser.request('POST', url, data=data)
-                    tree = etree.HTML(response.text)
-                except:
-                    logger.error('post %s timeout' % url)
+
+                while RETRY < 3 and not Flag:
+                    try:
+                        response = browser.request('POST', url, data=data)
+                        tree = etree.HTML(response.text)
+                        Flag = True
+                    except:
+                        logger.error('post %s timeout' % url)
+                        RETRY += 1
+                if not Flag:
                     continue
-                parse_page(tree, url, delay, deep, browser)
+
+                parse_page(tree, url, delay, deep, browser, domain)
 
             browser.quit()
     except Exception as e:
         print(e)
 
 
-def start_spider(surl, deep=0, delay_level=0, method='get', data=None, cookie=None):
+def start_spider(surl, domain=REG_DOMAIN, deep=0, delay_level=0, method='get', data=None, cookie=None):
     """
     surl        strat url: "https://www.baidu.com/?a=1&b=2" / scheme is required
+    domain      domain scope      [default = *]
     deep        recursion depth   [default = 0]
     delay_level delay crawl level [default = 0] / scope:0-5
     method      support get/post in lowercase [default = get]
@@ -322,10 +337,11 @@ def start_spider(surl, deep=0, delay_level=0, method='get', data=None, cookie=No
     DEFAULT_THREAD_NUMBER = os.cpu_count() or 1
     params = [cookie] * DEFAULT_THREAD_NUMBER
     ThreadId = [_ for _ in range(DEFAULT_THREAD_NUMBER)]
+    DOMAIN_SCOPE = [domain] * DEFAULT_THREAD_NUMBER
     with ThreadPoolExecutor(max_workers=DEFAULT_THREAD_NUMBER) as executor:
-        executor.map(get_url_hc, params, ThreadId)
+        executor.map(get_url_hc, params, ThreadId, DOMAIN_SCOPE)
 
     print('crawl completed')
 
 if __name__ == '__main__':
-    start_spider('https://v.qq.com', delay_level=2)
+    start_spider('https://www.baidu.com/', delay_level=2, domain='[]\s\S]*baidu.com/?$')

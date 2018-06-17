@@ -7,9 +7,10 @@ Our spider use `selenium` + `headless chrome` to simulate a real browser environ
 When you install all relevant dependencies, you can use start spider easily like this:
 
 ```
-start_spider('https://www.example.com', deep=0, delay_level=3, method='get', data=None, cookie='a=1;b=3')
+start_spider('https://www.example.com', domain=REG_DOMAIN, deep=0, delay_level=3, method='get', data=None, cookie='a=1;b=3')
 
     surl        strat url: "https://www.baidu.com/?a=1&b=2" / scheme is required
+    domain      domain scope      [default = *]
     deep        recursion depth   [default = 0]
     delay_level delay crawl level [default = 0] / scope:0-5
     method      support get/post in lowercase [default = get]
@@ -22,5 +23,5 @@ In addition to these parameters, there are some other fields that need attention
 MAX_RECURSION_DEPTH     The maximum depth relative to the root node
 url_bloom               BloomFilter accuracy
 DB_CONNECT_STRING       Your database config
-DEFAULT_THREAD_NUMBER   The number of threads 
+DEFAULT_THREAD_NUMBER   The number of threads
 ```
