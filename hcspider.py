@@ -1,6 +1,6 @@
 # -*- coding: UTF-8 -*-
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy import Column, String, Integer, Text
+from sqlalchemy import Column, String, Integer, Text, Boolean
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy import create_engine
 from selenium.webdriver.chrome.options import Options
@@ -17,16 +17,23 @@ import time
 import logging
 import queue
 import pybloomfilter
-import multiprocessing
-import threadpool
 import threading
 import json
+import subprocess
 
 MAX_RECURSION_DEPTH = 2
 q = queue.Queue()
-url_bloom = pybloomfilter.BloomFilter(10000, 0.01, 'url.bloom')
+
 delay_time = [0, 2, 5, 10, 20, 60]
 REG_DOMAIN = '^[]\s\S]*$'
+
+# rm last BloomFilter
+try:
+    subprocess.check_output(['rm', 'url.bloom'])
+except:
+    pass
+
+url_bloom = pybloomfilter.BloomFilter(100000, 0.01, 'url.bloom')
 
 # set logger
 logger = logging.getLogger('mylog')
@@ -49,11 +56,12 @@ try:
 except ImportError:
     pass
 
-DB_CONNECT_STRING = 'mysql+mysqldb://root:@localhost/hcspider?charset=utf8'
+DB_CONNECT_STRING = 'mysql+mysqldb://root:HUANGxk619@localhost/hcspider?charset=utf8'
 db = create_engine(DB_CONNECT_STRING, max_overflow=50)
 Base = declarative_base()
 Session = sessionmaker(bind=db)
 session = Session()
+
 
 class SpiderItem(Base):
 
@@ -65,7 +73,7 @@ class SpiderItem(Base):
     netloc = Column(String(255), nullable=False)
     data = Column(Text, nullable=True, default=None)
     deep = Column(Integer, nullable=False, default=0)
-
+    has_params = Column(Boolean, nullable=False, default=False)
     def __str__(self):
         return 'Item [%s] %s' % (self.method, self.url)
 
@@ -90,26 +98,34 @@ def rand_string(n):
     return res
 
 
+def clean_up_path(url):
+    q = parse.urlparse(url)
+    if q.path == '':
+        return parse.urlunparse((q.scheme, q.netloc, '/', q.params, q.query, ''))
+    else:
+        return parse.urlunparse(q)
+
+
 def clean_up_url(orurl, current_url):
     if orurl is None:
         return None
     else:
         # https://a.b/c?d=e
         if re.match('^http[s]?://[\s\S]+\.[\s\S]+', orurl):
-            return orurl
+            return clean_up_path(orurl)
         # //a.b/c?d=e
         elif re.match('^//[^/][\s\S]*\.[\s\S]+', orurl):
             sch = parse.urlparse(current_url).scheme
-            return sch + ":" + orurl
+            return clean_up_path(sch + ":" + orurl)
         # /a.b/c?d=e
         elif re.match('^/[^/][\s\S]*\.[\s\S]+', orurl):
-            return parse.urljoin(current_url, orurl[1:])
+            return clean_up_path(parse.urljoin(current_url, orurl[1:]))
         # javascript:;
         elif re.match('^javascript:[\s\S]+', orurl, re.IGNORECASE):
             return None
         # a.b/c?d=e
         elif re.match('^[^/]{2}[\s\S]+', orurl):
-            return parse.urljoin(current_url, orurl)
+            return clean_up_path(parse.urljoin(current_url, orurl))
         else:
             return None
 
@@ -143,12 +159,12 @@ def parse_form_input(type, name, value):
 
 def parse_page(tree, current_url, delay, deep, br, domain):
     tmp = []
-    global q, url_bloom
+    global q, url_bloom, session
     # get url in href
     for link in tree.xpath("//@href"):
         curl = clean_up_url(link, current_url)
-        if (curl is not None) and not re.match(r'[\s\S]*(\.png|\.jpg|\.css|\.gif|\.js|\.ico|\.xml|\.svg|\.pdf)$', parse.urlparse(link).path):
-            uuid = calc_url_uuid('get', link)
+        if (curl is not None) and not re.match(r'[\s\S]*(\.png|\.jpg|\.css|\.gif|\.js|\.ico|\.xml|\.svg|\.pdf)$', parse.urlparse(curl).path) and not re.match(r'[\s\S]*(\.png|\.jpg|\.css|\.gif|\.js|\.ico|\.xml|\.svg|\.pdf)$', curl):
+            uuid = calc_url_uuid('get', curl)
             if uuid not in url_bloom:
                 # each item in queue consists of (method, url, data, delay, deep)
                 # store in tmp array to parse sim
@@ -192,20 +208,22 @@ def parse_page(tree, current_url, delay, deep, br, domain):
             uuid += '/' + '&'.join(sorted([_ for _ in post_data]))
             if uuid not in url_bloom and re.match(domain, form_url):
                 q.put(('post', form_url, post_data, delay, deep + 1))
-                session.add(SpiderItem(method=method, url=form_url, netloc=parse.urlparse(form_url).netloc, data=json.dumps(post_data), deep=deep+1))
+                session.add(SpiderItem(method=method, url=form_url, netloc=parse.urlparse(
+                    form_url).netloc, data=json.dumps(post_data), deep=deep + 1,  has_params=True))
                 session.commit()
-                logger.info('add item: [%s] %s' %(method, form_url))
+                logger.info('add item: [%s] %s' % (method, form_url))
             url_bloom.add(uuid)
 
-        path_list = [parse.urlparse(_[1]).path for _ in tmp]
-        sim_list = remove_sim_url(path_list)
-        for item in tmp:
-            if parse.urlparse(item[1]).path in sim_list and re.match(domain, item[1]):
-                q.put(item)
-                session.add(SpiderItem(method=item[0], url=item[1], netloc=parse.urlparse(item[1]).netloc, data=item[2], deep=item[4]))
-                session.commit()
-                logger.info('add item: [%s] %s' %(method, item[1]))
-
+    url_list = [_[1] for _ in tmp]
+    sim_list = remove_sim_url(url_list)
+    for item in tmp:
+        if item[1] in sim_list and re.match(domain, parse.urlparse(item[1]).netloc):
+            q.put(item)
+            h = (parse.urlparse(item[1]).query=='')
+            session.add(SpiderItem(method=item[0], url=item[1], netloc=parse.urlparse(
+                item[1]).netloc, data=item[2], deep=item[4], has_params=h))
+            session.commit()
+            logger.info('add item: [%s] %s' % (item[0], item[1]))
 
 
 def get_url_hc(cookie, ThreadId, domain):
@@ -214,7 +232,7 @@ def get_url_hc(cookie, ThreadId, domain):
     try:
         RETRY = 0
         while RETRY < 5:
-            if q.qsize()>0:
+            if q.qsize() > 0:
                 try:
                     item = q.get(timeout=3)
                 except:
@@ -245,7 +263,7 @@ def get_url_hc(cookie, ThreadId, domain):
                 browser.implicitly_wait(10)
                 RETRY = 0
                 Flag = False
-                while RETRY<3 and not Flag:
+                while RETRY < 3 and not Flag:
                     try:
                         browser.get(url)
                         Flag = True
@@ -302,7 +320,7 @@ def get_url_hc(cookie, ThreadId, domain):
                     continue
 
                 parse_page(tree, url, delay, deep, browser, domain)
-
+            # browser.save_screenshot('main.png')
             browser.quit()
     except Exception as e:
         print(e)
@@ -320,7 +338,7 @@ def start_spider(surl, domain=REG_DOMAIN, deep=0, delay_level=0, method='get', d
 
     each item in queue consists of (method, url, data, delay, deep)
     """
-    global q
+    global q, url_bloom, session
 
     # create database
     Base.metadata.create_all(db)
@@ -329,9 +347,12 @@ def start_spider(surl, domain=REG_DOMAIN, deep=0, delay_level=0, method='get', d
     delay = delay_time[delay_level]
     # create start item
     q.put((method, start_url, data, delay, deep))
-    session.add(SpiderItem(method=method, url=start_url, netloc=parse.urlparse(start_url).netloc, data=data, deep=deep))
+    url_bloom.add(calc_url_uuid('get', start_url))
+
+    session.add(SpiderItem(method=method, url=start_url,
+                           netloc=parse.urlparse(start_url).netloc, data=data, deep=deep))
     session.commit()
-    logger.info('add item: [%s] %s' %(method, start_url))
+    logger.info('add item: [%s] %s' % (method, start_url))
     # get_url_hc(cookie)
     # DEFAULT_THREAD_NUMBER = (os.cpu_count() or 1) * 5
     DEFAULT_THREAD_NUMBER = os.cpu_count() or 1
@@ -343,5 +364,6 @@ def start_spider(surl, domain=REG_DOMAIN, deep=0, delay_level=0, method='get', d
 
     print('crawl completed')
 
+
 if __name__ == '__main__':
-    start_spider('https://www.baidu.com/', delay_level=2, domain='[]\s\S]*baidu.com/?$')
+    start_spider('https://v.qq.com/', delay_level=2, domain='[\s\S]*qq.com/?$')
