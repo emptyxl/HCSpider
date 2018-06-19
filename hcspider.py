@@ -56,7 +56,7 @@ try:
 except ImportError:
     pass
 
-DB_CONNECT_STRING = 'mysql+mysqldb://root:HUANGxk619@localhost/hcspider?charset=utf8'
+DB_CONNECT_STRING = 'mysql+mysqldb://root:@localhost/hcspider?charset=utf8'
 db = create_engine(DB_CONNECT_STRING, max_overflow=50)
 Base = declarative_base()
 Session = sessionmaker(bind=db)
