@@ -26,7 +26,7 @@ q = queue.Queue()
 
 delay_time = [0, 2, 5, 10, 20, 60]
 REG_DOMAIN = '^[]\s\S]*$'
-
+IGNORE_SUFFIX = r'[\s\S]*(\.png|\.jpg|\.css|\.gif|\.js|\.ico|\.xml|\.svg|\.pdf|\.zt)$'
 # rm last BloomFilter
 try:
     subprocess.check_output(['rm', 'url.bloom'])
@@ -56,7 +56,7 @@ try:
 except ImportError:
     pass
 
-DB_CONNECT_STRING = 'mysql+mysqldb://root:@localhost/hcspider?charset=utf8'
+DB_CONNECT_STRING = 'mysql+mysqldb://root:HUANGxk619@localhost/hcspider?charset=utf8'
 db = create_engine(DB_CONNECT_STRING, max_overflow=50)
 Base = declarative_base()
 Session = sessionmaker(bind=db)
@@ -74,11 +74,14 @@ class SpiderItem(Base):
     data = Column(Text, nullable=True, default=None)
     deep = Column(Integer, nullable=False, default=0)
     has_params = Column(Boolean, nullable=False, default=False)
+    cookies = Column(Text,nullable=False)
     def __str__(self):
         return 'Item [%s] %s' % (self.method, self.url)
 
 
 def cookie2dict(cookie):
+    if cookie is None or cookie=='':
+        return {}
     cookies = dict([l.split("=", 1) for l in cookie.split("; ")])
     return cookies
 
@@ -129,6 +132,12 @@ def clean_up_url(orurl, current_url):
         else:
             return None
 
+def list_cookies2dict(cookie_list):
+    ck = {}
+    for c in cookie_list:
+        ck[c['name']] = c['value']
+
+    return ck
 
 def parse_form_input(type, name, value):
     if name is None or name == '':
@@ -154,8 +163,6 @@ def parse_form_input(type, name, value):
         else:
             return (name, rand_string(random.randint(10, 15)))
 
-    return None
-
 
 def parse_page(tree, current_url, delay, deep, br, domain):
     tmp = []
@@ -163,12 +170,12 @@ def parse_page(tree, current_url, delay, deep, br, domain):
     # get url in href
     for link in tree.xpath("//@href"):
         curl = clean_up_url(link, current_url)
-        if (curl is not None) and not re.match(r'[\s\S]*(\.png|\.jpg|\.css|\.gif|\.js|\.ico|\.xml|\.svg|\.pdf)$', parse.urlparse(curl).path) and not re.match(r'[\s\S]*(\.png|\.jpg|\.css|\.gif|\.js|\.ico|\.xml|\.svg|\.pdf)$', curl):
+        if (curl is not None) and not re.match(IGNORE_SUFFIX, parse.urlparse(curl).path) and not re.match(IGNORE_SUFFIX, curl):
             uuid = calc_url_uuid('get', curl)
             if uuid not in url_bloom:
                 # each item in queue consists of (method, url, data, delay, deep)
                 # store in tmp array to parse sim
-                tmp.append(('get', curl, None, delay, deep + 1))
+                tmp.append(('get', curl, None, delay, deep + 1, list_cookies2dict(br.get_cookies())))
             url_bloom.add(uuid)
 
     # get url in form
@@ -198,7 +205,7 @@ def parse_page(tree, current_url, delay, deep, br, domain):
                                      parse.urlparse(form_url).path, '', parse.urlencode(post_data), ''))
             uuid = calc_url_uuid('get', gurl)
             if uuid not in url_bloom:
-                tmp.append(('get', gurl, None, delay, deep + 1))
+                tmp.append(('get', gurl, None, delay, deep + 1, list_cookies2dict(br.get_cookies())))
             url_bloom.add(uuid)
 
         elif method == 'post':
@@ -207,11 +214,12 @@ def parse_page(tree, current_url, delay, deep, br, domain):
                 parse.urlparse(form_url).path
             uuid += '/' + '&'.join(sorted([_ for _ in post_data]))
             if uuid not in url_bloom and re.match(domain, form_url):
-                q.put(('post', form_url, post_data, delay, deep + 1))
+                q.put(('post', form_url, post_data, delay, deep + 1, list_cookies2dict(br.get_cookies())))
                 session.add(SpiderItem(method=method, url=form_url, netloc=parse.urlparse(
-                    form_url).netloc, data=json.dumps(post_data), deep=deep + 1,  has_params=True))
+                    form_url).netloc, data=json.dumps(post_data), deep=deep + 1,  has_params=True, cookies = json.dumps(list_cookies2dict(br.get_cookies()))))
                 session.commit()
                 logger.info('add item: [%s] %s' % (method, form_url))
+                session.close()
             url_bloom.add(uuid)
 
     url_list = [_[1] for _ in tmp]
@@ -219,14 +227,15 @@ def parse_page(tree, current_url, delay, deep, br, domain):
     for item in tmp:
         if item[1] in sim_list and re.match(domain, parse.urlparse(item[1]).netloc):
             q.put(item)
-            h = (parse.urlparse(item[1]).query=='')
+            h = not (parse.urlparse(item[1]).query=='')
             session.add(SpiderItem(method=item[0], url=item[1], netloc=parse.urlparse(
-                item[1]).netloc, data=item[2], deep=item[4], has_params=h))
+                item[1]).netloc, data=item[2], deep=item[4], has_params=h, cookies=json.dumps(item[5])))
             session.commit()
             logger.info('add item: [%s] %s' % (item[0], item[1]))
+            session.close()
 
 
-def get_url_hc(cookie, ThreadId, domain):
+def get_url_hc(ThreadId, domain):
     logger.debug('start Thread [%s]' % ThreadId)
     global q, url_bloom
     try:
@@ -243,7 +252,7 @@ def get_url_hc(cookie, ThreadId, domain):
                 RETRY += 1
                 continue
             # each item in queue consists of (method, url, data, delay, deep)
-            method, url, data, delay, deep = item[0], item[1], item[2], item[3], item[4]
+            method, url, data, delay, deep, cookie = item[0], item[1], item[2], item[3], item[4], item[5]
             if deep >= MAX_RECURSION_DEPTH:
                 continue
             time.sleep(delay)
@@ -274,9 +283,9 @@ def get_url_hc(cookie, ThreadId, domain):
                 if not Flag:
                     continue
 
-                if cookie is not None:
+                if cookie is not None and len(cookie)>0:
                     browser.delete_all_cookies()
-                    Cookies = cookie2dict(cookie)
+                    Cookies = cookie
                     for key in Cookies:
                         browser.add_cookie(
                             {'name': key, 'value': Cookies[key]})
@@ -301,9 +310,9 @@ def get_url_hc(cookie, ThreadId, domain):
                 browser.set_script_timeout(15)
                 browser.implicitly_wait(10)
 
-                if cookie is not None:
+                if cookie is not None and len(cookie)>0:
                     browser.delete_all_cookies()
-                    Cookies = cookie2dict(cookie)
+                    Cookies = cookie
                     for key in Cookies:
                         browser.add_cookie(
                             {'name': key, 'value': Cookies[key]})
@@ -346,21 +355,21 @@ def start_spider(surl, domain=REG_DOMAIN, deep=0, delay_level=0, method='get', d
     start_url = surl
     delay = delay_time[delay_level]
     # create start item
-    q.put((method, start_url, data, delay, deep))
+    q.put((method, start_url, data, delay, deep, cookie2dict(cookie)))
     url_bloom.add(calc_url_uuid('get', start_url))
 
     session.add(SpiderItem(method=method, url=start_url,
-                           netloc=parse.urlparse(start_url).netloc, data=data, deep=deep))
+                           netloc=parse.urlparse(start_url).netloc, data=data, deep=deep, cookies=json.dumps(cookie2dict(cookie))))
     session.commit()
     logger.info('add item: [%s] %s' % (method, start_url))
-    # get_url_hc(cookie)
+    session.close()
+
     # DEFAULT_THREAD_NUMBER = (os.cpu_count() or 1) * 5
     DEFAULT_THREAD_NUMBER = os.cpu_count() or 1
-    params = [cookie] * DEFAULT_THREAD_NUMBER
     ThreadId = [_ for _ in range(DEFAULT_THREAD_NUMBER)]
     DOMAIN_SCOPE = [domain] * DEFAULT_THREAD_NUMBER
     with ThreadPoolExecutor(max_workers=DEFAULT_THREAD_NUMBER) as executor:
-        executor.map(get_url_hc, params, ThreadId, DOMAIN_SCOPE)
+        executor.map(get_url_hc, ThreadId, DOMAIN_SCOPE)
 
     print('crawl completed')
 
