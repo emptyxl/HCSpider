@@ -56,7 +56,7 @@ try:
 except ImportError:
     pass
 
-DB_CONNECT_STRING = 'mysql+mysqldb://root:HUANGxk619@localhost/hcspider?charset=utf8'
+DB_CONNECT_STRING = 'mysql+mysqldb://root:@localhost/RubScanner?charset=utf8'
 db = create_engine(DB_CONNECT_STRING, max_overflow=50)
 Base = declarative_base()
 Session = sessionmaker(bind=db)
@@ -171,11 +171,11 @@ def parse_page(tree, current_url, delay, deep, br, domain):
     for link in tree.xpath("//@href"):
         curl = clean_up_url(link, current_url)
         if (curl is not None) and not re.match(IGNORE_SUFFIX, parse.urlparse(curl).path) and not re.match(IGNORE_SUFFIX, curl):
-            uuid = calc_url_uuid('get', curl)
+            uuid = calc_url_uuid('GET', curl)
             if uuid not in url_bloom:
                 # each item in queue consists of (method, url, data, delay, deep)
                 # store in tmp array to parse sim
-                tmp.append(('get', curl, None, delay, deep + 1, list_cookies2dict(br.get_cookies())))
+                tmp.append(('GET', curl, None, delay, deep + 1, list_cookies2dict(br.get_cookies())))
             url_bloom.add(uuid)
 
     # get url in form
@@ -185,10 +185,10 @@ def parse_page(tree, current_url, delay, deep, br, domain):
         if form_url is None:
             continue
         method = form.get_attribute('method')
-        if method is None or method.lower() not in ['get', 'post']:
+        if method is None or method.upper() not in ['GET', 'POST']:
             continue
         else:
-            method = method.lower()
+            method = method.upper()
         all_input = form.find_elements_by_xpath('.//input')
         post_data = {}
         for input_element in all_input:
@@ -200,21 +200,21 @@ def parse_page(tree, current_url, delay, deep, br, domain):
                 post_data[item_data[0]] = item_data[1]
 
         # Add to corresponding list
-        if method == 'get':
+        if method == 'GET':
             gurl = parse.urlunparse((parse.urlparse(form_url).scheme, parse.urlparse(form_url).netloc,
                                      parse.urlparse(form_url).path, '', parse.urlencode(post_data), ''))
-            uuid = calc_url_uuid('get', gurl)
+            uuid = calc_url_uuid('GET', gurl)
             if uuid not in url_bloom:
-                tmp.append(('get', gurl, None, delay, deep + 1, list_cookies2dict(br.get_cookies())))
+                tmp.append(('GET', gurl, None, delay, deep + 1, list_cookies2dict(br.get_cookies())))
             url_bloom.add(uuid)
 
-        elif method == 'post':
+        elif method == 'POST':
             uuid = 'post/' + \
                 parse.urlparse(form_url).netloc + \
                 parse.urlparse(form_url).path
             uuid += '/' + '&'.join(sorted([_ for _ in post_data]))
-            if uuid not in url_bloom and re.match(domain, form_url):
-                q.put(('post', form_url, post_data, delay, deep + 1, list_cookies2dict(br.get_cookies())))
+            if uuid not in url_bloom and re.match(domain, parse.urlparse(form_url).netloc):
+                q.put(('POST', form_url, post_data, delay, deep + 1, list_cookies2dict(br.get_cookies())))
                 session.add(SpiderItem(method=method, url=form_url, netloc=parse.urlparse(
                     form_url).netloc, data=json.dumps(post_data), deep=deep + 1,  has_params=True, cookies = json.dumps(list_cookies2dict(br.get_cookies()))))
                 session.commit()
@@ -264,7 +264,7 @@ def get_url_hc(ThreadId, domain):
             chrome_options.add_argument('window-size=1200x600')
 
             # get data
-            if method == 'get':
+            if method == 'GET':
                 browser = webdriver.Chrome(
                     chrome_options=chrome_options, executable_path="./chromedriver")
                 browser.set_page_load_timeout(15)
@@ -277,10 +277,10 @@ def get_url_hc(ThreadId, domain):
                         browser.get(url)
                         Flag = True
                     except:
-                        logger.error('get %s timeout' % url)
                         RETRY += 1
 
                 if not Flag:
+                    logger.error('get %s timeout' % url)
                     continue
 
                 if cookie is not None and len(cookie)>0:
@@ -303,7 +303,7 @@ def get_url_hc(ThreadId, domain):
 
                 parse_page(tree, url, delay, deep, browser, domain)
 
-            elif method == 'post':
+            elif method == 'POST':
                 browser = post_Chrome(
                     chrome_options=chrome_options, executable_path="./chromedriver")
                 browser.set_page_load_timeout(15)
@@ -316,16 +316,17 @@ def get_url_hc(ThreadId, domain):
                     for key in Cookies:
                         browser.add_cookie(
                             {'name': key, 'value': Cookies[key]})
-
+                RETRY = 0
+                Flag = False
                 while RETRY < 3 and not Flag:
                     try:
                         response = browser.request('POST', url, data=data)
                         tree = etree.HTML(response.text)
                         Flag = True
                     except:
-                        logger.error('post %s timeout' % url)
                         RETRY += 1
                 if not Flag:
+                    logger.error('post %s timeout' % url)
                     continue
 
                 parse_page(tree, url, delay, deep, browser, domain)
@@ -335,13 +336,13 @@ def get_url_hc(ThreadId, domain):
         print(e)
 
 
-def start_spider(surl, domain=REG_DOMAIN, deep=0, delay_level=0, method='get', data=None, cookie=None):
+def start_spider(surl, domain=REG_DOMAIN, deep=0, delay_level=0, method='GET', data=None, cookie=None):
     """
     surl        strat url: "https://www.baidu.com/?a=1&b=2" / scheme is required
     domain      domain scope      [default = *]
     deep        recursion depth   [default = 0]
     delay_level delay crawl level [default = 0] / scope:0-5
-    method      support get/post in lowercase [default = get]
+    method      support GET/POST in uppercase [default = GET]
     data        post method parmas [default = None]
     cookie      you can copy the chrome cookies field directly, we will parse it [default = None]
 
@@ -356,7 +357,7 @@ def start_spider(surl, domain=REG_DOMAIN, deep=0, delay_level=0, method='get', d
     delay = delay_time[delay_level]
     # create start item
     q.put((method, start_url, data, delay, deep, cookie2dict(cookie)))
-    url_bloom.add(calc_url_uuid('get', start_url))
+    url_bloom.add(calc_url_uuid('GET', start_url))
 
     session.add(SpiderItem(method=method, url=start_url,
                            netloc=parse.urlparse(start_url).netloc, data=data, deep=deep, cookies=json.dumps(cookie2dict(cookie))))
@@ -375,4 +376,4 @@ def start_spider(surl, domain=REG_DOMAIN, deep=0, delay_level=0, method='get', d
 
 
 if __name__ == '__main__':
-    start_spider('https://v.qq.com/', delay_level=2, domain='[\s\S]*qq.com/?$')
+    start_spider('https://v.qq.com/', delay_level=2, domain='[\s\S]*qq.com$')
